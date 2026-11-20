@@ -115,6 +115,14 @@ jobs:
             echo "== apksigner verify"
             "$APKSIGNER" verify --print-certs "$APK" || true
             echo
+            echo "== merged manifest (feature, meta-data, activities, deep links)"
+            "$AAPT2" dump xmltree --file AndroidManifest.xml "$APK" | grep -E "E: (uses-feature|meta-data|activity|data)|A: .*(name|value|host|scheme|path)" || true
+            echo
+            echo "== classes of the extension in classes.dex (R8 must keep AnimeAlpha with its name)"
+            DEXDUMP=$(ls "$ANDROID_HOME"/build-tools/*/dexdump | sort -V | tail -n 1)
+            unzip -p "$APK" classes.dex > classes.dex || true
+            "$DEXDUMP" classes.dex | grep "Class descriptor" | grep "animeextension/en/animealpha/" || true
+            echo
             echo "== apk contents"
             unzip -l "$APK"
           } > apk-info.txt 2>&1
@@ -144,7 +152,7 @@ jobs:
             tail -n 40 format.log 2>/dev/null || true
             echo
             echo "## APK"
-            cat apk-info.txt 2>/dev/null | head -n 120 || true
+            cat apk-info.txt 2>/dev/null | head -n 220 || true
           } > report-1.txt
           {
             echo "## Gradle build log (tail)"
