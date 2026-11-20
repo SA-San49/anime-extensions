@@ -622,6 +622,14 @@ class AnimeAlpha : Source() {
             }
         }
 
+        // The site's TMDB images are landscape backdrops: ideal for the banner of the details screen.
+        val backdrop =
+            normalizeCover(
+                doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifEmpty { null }
+                    ?: doc.selectFirst("img[src*='tmdb.org'], img[src*='themoviedb.org']")?.imageUrl(),
+                BACKDROP_SIZE,
+            )?.takeIf { it.contains("image.tmdb.org") }
+
         val episodes =
             EPISODES_REGEX
                 .find(
@@ -639,6 +647,7 @@ class AnimeAlpha : Source() {
             url = path
             this.title = title
             thumbnail_url = cover ?: anime.thumbnail_url
+            background_url = backdrop
             genre = genres.joinToString().ifEmpty { null }
             // The site shows "N/A" while a series is still airing and the real total once it is done.
             status =
@@ -1638,6 +1647,7 @@ class AnimeAlpha : Source() {
         private const val COVER_TIMEOUT_MS = 7_000L
         private const val LIST_COVER_SIZE = "w500"
         private const val DETAIL_COVER_SIZE = "w780"
+        private const val BACKDROP_SIZE = "w1280"
         private const val DETAIL_TTL_MS = 2 * 60 * 1000L
         private const val DETAIL_CACHE_SIZE = 32
         private const val LISTING_TTL_MS = 45 * 1000L
