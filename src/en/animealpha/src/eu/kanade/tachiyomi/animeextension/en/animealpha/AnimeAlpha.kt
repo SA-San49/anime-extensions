@@ -389,16 +389,19 @@ class AnimeAlpha : Source() {
 
     private fun Document.hasNextPage(current: Int): Boolean {
         val links = select("a[href*='page=']")
-        if (links.any { it.text().equals("Next", ignoreCase = true) || it.attr("rel") == "next" }) return true
-        return links
-            .mapNotNull {
-                it
-                    .absUrl("href")
-                    .toHttpUrlOrNull()
-                    ?.queryParameter("page")
-                    ?.toIntOrNull()
-            }.any { it > current }
+        val next = links.firstOrNull { it.text().equals("Next", ignoreCase = true) || it.attr("rel") == "next" }
+        if (next != null) {
+            // A "Next" that points back at this page (a disabled last-page link) would loop forever.
+            val target = next.pageNumber()
+            return target == null || target > current
+        }
+        return links.mapNotNull { it.pageNumber() }.any { it > current }
     }
+
+    private fun Element.pageNumber(): Int? = absUrl("href")
+        .toHttpUrlOrNull()
+        ?.queryParameter("page")
+        ?.toIntOrNull()
 
     // ============================ List parsing ============================
 
@@ -472,6 +475,8 @@ class AnimeAlpha : Source() {
             .orEmpty()
             .ifEmpty { img?.attr("alt").orEmpty() }
             .ifEmpty { link.attr("title") }
+            // A card that is one big link (poster, bold title, "220 Episodes", genres): take the bold name, not all the text.
+            .ifEmpty { link.selectFirst("strong, b, [class*=title], [class*=name]")?.text().orEmpty() }
             .ifEmpty { link.text() }
             .ifEmpty { headings.firstOrNull()?.text().orEmpty() }
             .trim()
