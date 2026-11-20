@@ -84,12 +84,20 @@ if __name__ == "__main__":
     paths = [p for p in sys.argv[2:] if p]
     import os
     os.makedirs(out_dir, exist_ok=True)
+    log_lines = []
     for i, p in enumerate(paths, 1):
         try:
             html = get(p)
             name = re.sub(r"[^A-Za-z0-9._-]", "_", p)[:80]
             with open(f"{out_dir}/{i}_{name}", "w") as f:
                 f.write(html)
-            print(f"OK {p} -> {len(html)} bytes", flush=True)
+            msg = f"OK {p} -> {len(html)} bytes"
+            print(msg, flush=True)
+            log_lines.append(msg)
         except Exception as e:
-            print(f"FAIL {p}: {e}", flush=True)
+            import traceback
+            msg = f"FAIL {p}: {e}\n{traceback.format_exc()}"
+            print(msg, flush=True)
+            log_lines.append(msg)
+    with open(f"{out_dir}/_log.txt", "w") as f:
+        f.write("\n\n".join(log_lines))
