@@ -1,2 +1,9 @@
-/.within.website/x/cmd/anubis/static/js/worker/sha256.mjs?cacheBuster=v1.28.2
-/.within.website/x/cmd/anubis/static/js/worker/util.mjs?cacheBuster=v1.28.2
+/
+/anime
+/anime?letter=all&page=2
+/schedule
+/schedule/english-dub
+/airing/sub
+/airing/dual
+/anime/KJMXYJFEYMX7
+/search?q=naruto
