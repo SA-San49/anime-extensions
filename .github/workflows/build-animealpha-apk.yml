@@ -1,5 +1,18 @@
 name: Build AnimeAlpha APK
 
+# Signing: without any setup the APK is signed with the runner's throw-away debug key, so every build
+# has a different signature (Android then refuses to update over an older build, and Aniyomi asks to
+# trust the extension again). For a stable signature add these repository secrets
+# (Settings > Secrets and variables > Actions):
+#   ANIMEALPHA_SIGNING_KEY             base64 of a keystore:  base64 -w0 signingkey.jks
+#   ANIMEALPHA_KEY_STORE_PASSWORD      keystore password
+#   ANIMEALPHA_KEY_ALIAS               key alias
+#   ANIMEALPHA_KEY_PASSWORD            key password
+# e.g.  keytool -genkeypair -v -keystore signingkey.jks -alias animealpha -keyalg RSA -keysize 2048 -validity 36500
+# The repository's standard secret names (SIGNING_KEY, KEY_STORE_PASSWORD, ALIAS, KEY_PASSWORD, as used by
+# build_push.yml) work as well. The repository's build logic then signs with the key (it uses a root
+# signingkey.jks, which is git-ignored).
+
 on:
   workflow_dispatch:
   push:
@@ -63,8 +76,21 @@ jobs:
         continue-on-error: true
         env:
           CI: "false" # Spotless formats instead of failing, see the step above
+          # Optional stable signing key, see the comment at the top. All empty when the secrets are not set.
+          SIGNING_KEY_BASE64: ${{ secrets.ANIMEALPHA_SIGNING_KEY || secrets.SIGNING_KEY }}
+          KEY_STORE_PASSWORD: ${{ secrets.ANIMEALPHA_KEY_STORE_PASSWORD || secrets.KEY_STORE_PASSWORD }}
+          ALIAS: ${{ secrets.ANIMEALPHA_KEY_ALIAS || secrets.ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANIMEALPHA_KEY_PASSWORD || secrets.KEY_PASSWORD }}
         run: |
           set -o pipefail
+          if [ -n "$SIGNING_KEY_BASE64" ]; then
+            (umask 077 && printf '%s' "$SIGNING_KEY_BASE64" | base64 -d > signingkey.jks)
+            echo "mode=custom" >> "$GITHUB_OUTPUT"
+            echo "signing: repository key from the signing secrets"
+          else
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+            echo "signing: runner debug key (no signing secrets set)"
+          fi
           ./gradlew :src:en:animealpha:assembleRelease --console=plain --stacktrace 2>&1 | tee build.log
           exit "${PIPESTATUS[0]}"
 
@@ -93,18 +119,23 @@ jobs:
             unzip -l "$APK"
           } > apk-info.txt 2>&1
           cat apk-info.txt
+          SIGNER=$("$APKSIGNER" verify --print-certs "$APK" 2>/dev/null | sed -n 's/^.*certificate SHA-256 digest: //p' | head -n 1)
+          echo "signer=$SIGNER" >> "$GITHUB_OUTPUT"
 
       - name: Publish build report
         if: always()
         env:
           FORMAT_OUTCOME: ${{ steps.format.outcome }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
+          SIGNING_MODE: ${{ steps.build.outputs.mode }}
+          SIGNER: ${{ steps.apk.outputs.signer }}
         run: |
           {
             echo "# AnimeAlpha build"
             echo "commit: $GITHUB_SHA"
             echo "format check: $FORMAT_OUTCOME"
             echo "build: $BUILD_OUTCOME"
+            echo "signing: ${SIGNING_MODE:-unknown} (signer SHA-256: ${SIGNER:-n/a})"
             echo
             echo "## Problem lines"
             { cat format.log build.log 2>/dev/null || true; } | grep -nE "^e: |^w: .*animealpha|error:|FAILED|What went wrong|Execution failed|Caused by|ERROR:|format violations" | cut -c1-600 | head -n 150
@@ -160,16 +191,23 @@ jobs:
         env:
           APK_PATH: ${{ steps.apk.outputs.path }}
           VERSION: ${{ steps.apk.outputs.version }}
+          SIGNING_MODE: ${{ steps.build.outputs.mode }}
+          SIGNER: ${{ steps.apk.outputs.signer }}
         run: |
           TAG="animealpha-ci-${GITHUB_REF_NAME//[^A-Za-z0-9._-]/-}"
           NAME="tachiyomi-en.animealpha-v${VERSION}.apk"
+          if [ "$SIGNING_MODE" = "custom" ]; then
+            SIGNING="Signed with the repository's own key, so later builds update this one in place."
+          else
+            SIGNING="Signed with the CI runner's throw-away debug key: every build has a different signature, so uninstall an older build before installing a newer one (add the ANIMEALPHA_* secrets for a stable key, see the workflow file)."
+          fi
           cp "$APK_PATH" "$NAME"
           gh release delete "$TAG" --cleanup-tag --yes 2>/dev/null || true
           gh release create "$TAG" "$NAME" \
             --target "$GITHUB_SHA" \
             --prerelease \
             --title "AnimeAlpha $VERSION (CI build of ${GITHUB_SHA::7})" \
-            --notes "Debug-signed build of the AnimeAlpha extension (extension lib 16) from \`$GITHUB_REF_NAME\` at \`${GITHUB_SHA::7}\`. Install it in Aniyomi / Anikku via Settings > Browse > Extensions > Install from file (or open the APK), then trust the extension when asked."
+            --notes "AnimeAlpha extension (extension lib 16) built from \`$GITHUB_REF_NAME\` at \`${GITHUB_SHA::7}\`. Install it in Aniyomi / Anikku via Settings > Browse > Extensions > Install from file (or open the APK), then trust the extension when asked. $SIGNING Signer SHA-256: \`${SIGNER:-n/a}\`."
           echo "Published: $(gh release view "$TAG" --json url --jq .url)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Fail the job when the build failed
