@@ -72,7 +72,7 @@ def get(path):
     for attempt in range(4):
         final, html = fetch(url)
         if "anubis_challenge" in html:
-            if not solve_anubis(html, urllib.parse.quote(final, safe="")):
+            if not solve_anubis(html, final):
                 break
             continue
         return html
