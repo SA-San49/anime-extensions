@@ -255,9 +255,17 @@ class AnimeAlpha : Source() {
 
         // A pasted site link (or bare id) opens that title directly.
         pathFromQuery(text)?.let { path ->
-            val anime = getAnimeDetails(SAnime.create().apply { url = path })
-            anime.url = path
-            return AnimesPage(listOf(anime), false)
+            val anime =
+                try {
+                    getAnimeDetails(SAnime.create().apply { url = path }).apply { url = path }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // A pasted link must fail loudly; a bare word that merely looks like an id is searched for.
+                    if (text.startsWith("http", ignoreCase = true)) throw e
+                    null
+                }
+            if (anime != null) return AnimesPage(listOf(anime), false)
         }
 
         if (text.isNotEmpty()) return searchText(text, page)
@@ -294,7 +302,8 @@ class AnimeAlpha : Source() {
                         genre = suggestion.genres.joinToString().ifEmpty { null }
                     }
                 }
-            return AnimesPage(animes, hasNextPage = suggestions.size >= SUGGESTION_LIMIT)
+            // The live-search API shows at most a few titles; the full result page is page 2.
+            return AnimesPage(animes, hasNextPage = true)
         }
         if (page > 2 || (page == 2 && suggestions.isEmpty())) return AnimesPage(emptyList(), false)
 
@@ -404,18 +413,9 @@ class AnimeAlpha : Source() {
         val result = LinkedHashMap<String, SAnime>()
         root.select("a[href]").forEach { link ->
             val path = animePath(link.absUrl("href").ifEmpty { link.attr("href") }) ?: return@forEach
-            val card = link.closest(CARD_SELECTOR) ?: link
-            val scope = if (card !== link && card.linkedAnimeCount() > 1) link else card
-            val img = scope.selectFirst("img")
-            val title =
-                scope
-                    .selectFirst(TITLE_SELECTOR)
-                    ?.text()
-                    .orEmpty()
-                    .ifEmpty { img?.attr("alt").orEmpty() }
-                    .ifEmpty { link.attr("title") }
-                    .ifEmpty { link.text() }
-                    .trim()
+            val card = cardOf(link, root)
+            val img = card.selectFirst("img")
+            val title = titleOf(card, link, img)
             if (title.isEmpty() || title.lowercase() in IGNORED_TITLES) return@forEach
 
             val thumbnail = normalizeCover(img?.imageUrl(), LIST_COVER_SIZE)
@@ -435,6 +435,46 @@ class AnimeAlpha : Source() {
         return result.values.toList().onEach { anime ->
             if (anime.thumbnail_url == null) anime.thumbnail_url = coverCache[anime.url]
         }
+    }
+
+    /**
+     * The block that holds one title together with its poster: the outermost ancestor of [link] that
+     * still links to a single anime. The poster is often a sibling of the block holding the title
+     * (`div.poster-wrap` next to `div.card-body`), so the nearest "card-like" ancestor is not enough.
+     */
+    private fun cardOf(
+        link: Element,
+        root: Element,
+    ): Element {
+        var card = link
+        var parent = link.parent()
+        var depth = 0
+        while (parent != null && parent !== root && depth < MAX_CARD_DEPTH && parent.tagName() !in CARD_BOUNDARIES) {
+            if (parent.linkedAnimeCount() > 1) break
+            card = parent
+            parent = parent.parent()
+            depth++
+        }
+        return card
+    }
+
+    /** A heading wrapping the link wins over any other heading, so a page heading is never mistaken for a title. */
+    private fun titleOf(
+        card: Element,
+        link: Element,
+        img: Element?,
+    ): String {
+        val headings = card.select(TITLE_SELECTOR)
+        val ancestors = link.parents()
+        val heading = headings.firstOrNull { it in ancestors } ?: headings.firstOrNull { it.`is`(SPECIFIC_TITLE_SELECTOR) }
+        return heading
+            ?.text()
+            .orEmpty()
+            .ifEmpty { img?.attr("alt").orEmpty() }
+            .ifEmpty { link.attr("title") }
+            .ifEmpty { link.text() }
+            .ifEmpty { headings.firstOrNull()?.text().orEmpty() }
+            .trim()
     }
 
     private fun Element.linkedAnimeCount(): Int = select("a[href*='/anime/']")
@@ -619,7 +659,7 @@ class AnimeAlpha : Source() {
         val containers = listOfNotNull(h1, h1.parent())
         for (container in containers) {
             val list =
-                generateSequence(container.nextElementSibling()) { it.nextElementSibling() }
+                generateSequence<Element>(container.nextElementSibling()) { it.nextElementSibling() }
                     .takeWhile { it.tagName() != "h2" }
                     .firstNotNullOfOrNull { sibling -> if (sibling.tagName() == "ul") sibling else sibling.selectFirst("ul") }
             val genres =
@@ -643,7 +683,7 @@ class AnimeAlpha : Source() {
             ?.let { return it }
         val heading = select("h2, h3").firstOrNull { it.text().equals("Synopsis", ignoreCase = true) }
         heading
-            ?.let { generateSequence(it.nextElementSibling()) { next -> next.nextElementSibling() } }
+            ?.let { generateSequence<Element>(it.nextElementSibling()) { next -> next.nextElementSibling() } }
             ?.firstOrNull { it.tagName() != "button" && it.text().length > 20 }
             ?.text()
             ?.removeSuffix("Read more")
@@ -1311,7 +1351,14 @@ class AnimeAlpha : Source() {
         val resolved =
             withTimeoutOrNull(REDIRECT_TIMEOUT_MS) {
                 runCatching {
-                    val headers = videoHeaders(url).newBuilder().set("Range", "bytes=0-0").build()
+                    // No manual Cookie header here: the client's cookie jar attaches the site's cookies
+                    // to site hosts only, while a hand-set header would follow the redirect to the file host.
+                    val headers =
+                        headersBuilder()
+                            .set("Accept", "*/*")
+                            .set("Referer", "$baseUrl/")
+                            .set("Range", "bytes=0-0")
+                            .build()
                     client.get(httpUrl, headers, CacheControl.FORCE_NETWORK, ensureSuccess = false).use { response ->
                         val type = response.header("Content-Type").orEmpty()
                         val ok = response.isSuccessful && (!media || !type.contains("html", ignoreCase = true))
@@ -1579,7 +1626,6 @@ class AnimeAlpha : Source() {
         private const val RATE_LIMIT_PERMITS = 5
         private const val LATEST_PAGE_SIZE = 24
         private const val LATEST_TTL_MS = 2 * 60 * 1000L
-        private const val SUGGESTION_LIMIT = 8
         private const val SUGGESTION_TTL_MS = 10 * 60 * 1000L
         private const val SUGGESTION_CACHE_SIZE = 96
         private const val SCHEDULE_TTL_MS = 30 * 60 * 1000L
@@ -1640,12 +1686,13 @@ class AnimeAlpha : Source() {
                 "stream-lavf-o-append" to "reconnect=1",
             )
 
-        private const val CARD_SELECTOR =
-            "article, li, .anime-card, .spotlight-slide, .similar-anime-card, .mini-item, .anime-item, [class*=card]"
-        private const val TITLE_SELECTOR = ".spotlight-title, .similar-anime-title, h1, h2, h3, h4, .title, .anime-title"
+        private const val MAX_CARD_DEPTH = 6
+        private val CARD_BOUNDARIES = setOf("html", "body", "main", "section", "ul", "ol", "aside", "nav", "header", "footer")
+        private const val SPECIFIC_TITLE_SELECTOR = ".spotlight-title, .similar-anime-title, .anime-title"
+        private const val TITLE_SELECTOR = "$SPECIFIC_TITLE_SELECTOR, h1, h2, h3, h4, .title"
         private val IGNORED_TITLES = setOf("view more", "watch now", "watch", "details", "more info", "a-z list", "anime", "subscribe")
 
-        private val ID_REGEX = Regex("^[A-Za-z0-9]{12}$")
+        private val ID_REGEX = Regex("^[A-Z0-9]{12}$")
         private val EPISODES_REGEX = Regex("""Episodes:?\s*(N/A|\d+)""", RegexOption.IGNORE_CASE)
         private val EPISODE_LABEL_REGEX = Regex("""EPISODE\s*(\d+(?:\.\d+)?)""", RegexOption.IGNORE_CASE)
         private val LEADING_NUMBER_REGEX = Regex("""^\s*(\d+(?:\.\d+)?)""")
