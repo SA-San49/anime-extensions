@@ -1,0 +1,17 @@
+OK / -> 34065 bytes
+
+OK /anime -> 36171 bytes
+
+OK /anime?letter=all&page=2 -> 36265 bytes
+
+OK /schedule -> 35536 bytes
+
+OK /schedule/english-dub -> 54027 bytes
+
+OK /airing/sub -> 36193 bytes
+
+OK /airing/dual -> 36197 bytes
+
+OK /anime/KJMXYJFEYMX7 -> 36225 bytes
+
+OK /search?q=naruto -> 36215 bytes
