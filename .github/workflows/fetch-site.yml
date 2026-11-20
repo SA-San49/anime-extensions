@@ -7,6 +7,12 @@ on:
         description: "Newline-separated URL paths (e.g. / or /anime?letter=all)"
         required: true
         type: string
+  push:
+    branches:
+      - "arena/**"
+    paths:
+      - ".github/workflows/fetch-site.yml"
+      - ".fetch-paths.txt"
 
 permissions:
   contents: read
@@ -17,9 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Fetch all paths
         env:
-          PATHS: ${{ inputs.paths }}
+          PATHS: ${{ inputs.paths || '' }}
         run: |
           mkdir -p out
           i=0
@@ -34,6 +42,19 @@ jobs:
               -o "out/${i}_${name}" -w "%{http_code}" "$url" --max-time 30)
             echo "$code $url -> out/${i}_${name} ($(wc -c < "out/${i}_${name}") bytes)"
           done <<< "$PATHS"
+          if [ -z "$PATHS" ] && [ -f .fetch-paths.txt ]; then
+            PATHS=$(cat .fetch-paths.txt)
+            while IFS= read -r p; do
+              [ -z "$p" ] && continue
+              i=$((i+1))
+              url="https://animealpha.cc${p}"
+              name=$(echo "$p" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-80)
+              code=$(curl -sL --compressed -A "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36" \
+                -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+                -o "out/${i}_${name}" -w "%{http_code}" "$url" --max-time 30)
+              echo "$code $url -> out/${i}_${name} ($(wc -c < "out/${i}_${name}") bytes)"
+            done <<< "$PATHS"
+          fi
           # also grab homepage and extract asset URLs for follow-up
           grep -oE '(src|href)="[^"]+\.(js|css)[^"]*"' out/* 2>/dev/null | sort -u | head -100 > out/_assets.txt || true
           grep -oE 'https?://[^"]+api[^"]*' out/* 2>/dev/null | sort -u | head -50 > out/_api_urls.txt || true
