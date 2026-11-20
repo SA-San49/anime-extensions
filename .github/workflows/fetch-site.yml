@@ -59,9 +59,13 @@ jobs:
           grep -oE '(src|href)="[^"]+\.(js|css)[^"]*"' out/* 2>/dev/null | sort -u | head -100 > out/_assets.txt || true
           grep -oE 'https?://[^"]+api[^"]*' out/* 2>/dev/null | sort -u | head -50 > out/_api_urls.txt || true
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fetched-pages
-          path: out/
-          retention-days: 1
+      - name: Commit fetched pages to fetch-relay branch
+        run: |
+          cd out
+          git init -q .
+          git checkout -q -b fetch-relay
+          git config user.name "fetch-relay"
+          git config user.email "relay@users.noreply.github.com"
+          git add -A
+          git commit -q -m "fetch: ${{ github.run_id }}" || exit 0
+          git push -q "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" fetch-relay --force
