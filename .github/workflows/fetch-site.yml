@@ -15,7 +15,7 @@ on:
       - ".fetch-paths.txt"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   fetch:
