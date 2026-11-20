@@ -1,2 +1,2 @@
-/.within.website/x/cmd/anubis/static/js/main.mjs?cacheBuster=v1.28.2
-/.within.website/x/xess/xess.min.css?cachebuster=v1.28.2
+/.within.website/x/cmd/anubis/static/js/worker/sha256.mjs?cacheBuster=v1.28.2
+/.within.website/x/cmd/anubis/static/js/worker/util.mjs?cacheBuster=v1.28.2
