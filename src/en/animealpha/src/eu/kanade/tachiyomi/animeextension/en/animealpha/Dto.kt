@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.en.animealpha
 
 import kotlinx.serialization.Serializable
+import java.io.IOException
 
 /** Answer of `/search_suggestions?q=`: the site's own live-search API (at most eight titles). */
 @Serializable
@@ -16,20 +17,21 @@ internal class SuggestionDto(
     val genres: List<String> = emptyList(),
 )
 
-/** Everything a hoster needs to resolve its videos later on. */
+/** Everything a hoster needs to find its episode again when it is picked (no network call is made to build it). */
 @Serializable
 internal data class HosterData(
-    val href: String,
-    val referer: String,
-    val resolution: Int,
     val id: String,
     val season: String,
     val number: Float,
+    val resolution: Int,
     val audio: String? = null,
-    val ddl: String? = null,
-    val primary: Boolean = false,
-    val gate: String = "",
 )
+
+/** A download page that cannot be used; [tryNext] says whether another quality is worth a try. */
+internal class DownloadPageException(
+    message: String,
+    val tryNext: Boolean = false,
+) : IOException(message)
 
 /** One file of a season listing: `/download/<id>/<season>/<resolution>/<uuid>?token=…`. */
 internal class EpisodeEntry(

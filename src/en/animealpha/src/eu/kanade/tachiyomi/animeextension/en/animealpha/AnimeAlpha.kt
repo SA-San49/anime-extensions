@@ -23,11 +23,12 @@ import keiyoushi.utils.parallelMap
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.useAsJsoup
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
@@ -42,6 +43,7 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -835,6 +837,7 @@ class AnimeAlpha : Source() {
         season: String,
         resolution: String,
         fresh: Boolean = false,
+        strict: Boolean = false,
     ): List<EpisodeEntry> {
         val url = listingUrl(id, season, resolution).toString()
         val now = System.currentTimeMillis()
@@ -842,8 +845,11 @@ class AnimeAlpha : Source() {
 
         val response = client.get(url, pageHeaders("$baseUrl/anime/$id"), CacheControl.FORCE_NETWORK, ensureSuccess = false)
         if (!response.isSuccessful) {
-            // 404 = no such season / resolution. Anything else is treated the same so probing never aborts.
+            // 404 = no such season / resolution. While probing, anything else is treated the same so it never
+            // aborts; a play (strict) wants to know that the site itself failed.
+            val code = response.code
             response.close()
+            if (strict && code != 404) throw IOException("The site answered HTTP $code while loading the episode. Try again in a moment.")
             return emptyList()
         }
         val entries = parseListing(response.bodyString(), season, url)
@@ -934,70 +940,26 @@ class AnimeAlpha : Source() {
 
     // =============================== Hosters ==============================
 
-    /** Per-episode signal: backup qualities start once the primary one is done. */
-    private val gates = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
-
-    /** The site's gateway bans bursts, so backup qualities resolve two at a time. */
-    private val backupPermits = Semaphore(BACKUP_CONCURRENCY)
-
     /**
-     * One hoster per quality. None of them is lazy: the player only auto-loads non-lazy hosters, so
-     * all-lazy hosters would end in "No available videos". The preferred quality is fetched in full;
-     * the other listings only get a short grace period, so one slow page on a weak connection never
-     * holds back the episode.
+     * The quality list needs no network call, so it is on screen the moment an episode opens. Only the
+     * preferred quality loads by itself (the player only auto-loads hosters that are not lazy); the others
+     * load when they are picked. A play therefore makes a single trip through the site's ad-heavy download
+     * page instead of four at once, which is what used to take minutes.
      */
-    override suspend fun getHosterList(episode: SEpisode): List<Hoster> = coroutineScope {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val ref =
             EpisodeRef.parse(episode.url)
                 ?: throw Exception("Old episode link — refresh the episode list (pull down on the anime page)")
+        val audio = ref.audio ?: audioTag(episode.scanlator)
         val preferred = prefQuality.toIntOrNull()
-        val ordered =
-            STANDARD_RESOLUTIONS.entries.sortedWith(
-                compareByDescending<Map.Entry<Int, String>> { it.key == preferred }.thenByDescending { it.key },
-            )
-
-        val jobs =
-            ordered.map { (height, resolution) ->
-                Triple(height, resolution, async { runCatching { fetchListing(ref.id, ref.season, resolution, fresh = true) }.getOrNull() })
-            }
-        var deadline = 0L
-        val found =
-            jobs.mapNotNull { (height, resolution, job) ->
-                val entries =
-                    if (deadline == 0L) {
-                        job.await().also { deadline = System.currentTimeMillis() + OPTIONAL_LISTING_MS }
-                    } else {
-                        withTimeoutOrNull((deadline - System.currentTimeMillis()).coerceAtLeast(1L)) { job.await() }
-                    }
-                entries?.findMatch(ref)?.let { Triple(height, resolution, it) }
-            }
-        jobs.forEach { it.third.cancel() }
-        if (found.isEmpty()) {
-            throw Exception("No servers found for this episode. Pull down on the anime page to refresh, then retry.")
-        }
-
-        val gateKey = episode.url + "#" + System.nanoTime()
-        if (gates.size > GATE_CACHE_SIZE) gates.clear()
-        gates[gateKey] = CompletableDeferred()
-
-        found.mapIndexed { index, (height, resolution, match) ->
-            val data =
-                HosterData(
-                    href = match.href,
-                    referer = listingUrl(ref.id, ref.season, resolution).toString(),
-                    resolution = height,
-                    id = ref.id,
-                    season = ref.season,
-                    number = match.number,
-                    audio = match.audio,
-                    ddl = match.ddl,
-                    primary = index == 0,
-                    gate = gateKey,
-                )
+        val heights = STANDARD_RESOLUTIONS.keys.sortedWith(compareByDescending<Int> { it == preferred }.thenByDescending { it })
+        return heights.mapIndexed { index, height ->
+            val data = HosterData(id = ref.id, season = ref.season, number = ref.number, resolution = height, audio = audio)
             Hoster(
-                hosterUrl = baseUrl + match.href,
-                hosterName = "${height}p" + (match.audio?.let { " · $it" } ?: ""),
+                hosterUrl = listingUrl(ref.id, ref.season, STANDARD_RESOLUTIONS.getValue(height)).toString(),
+                hosterName = "${height}p" + (audio?.let { " · $it" } ?: ""),
                 internalData = data.toJsonString(),
+                lazy = index != 0,
             )
         }
     }
@@ -1012,131 +974,212 @@ class AnimeAlpha : Source() {
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
         hoster.videoList?.takeIf { it.isNotEmpty() }?.let { return it }
-        val data = hoster.internalData.parseAs<HosterData>()
-        val gate = gates[data.gate]
-
-        if (data.primary) {
-            try {
-                return resolveHoster(data, hoster.hosterName)
-            } finally {
-                gate?.complete(Unit)
-            }
-        }
-        // Give the preferred quality the connection first; it is the one that plays.
-        gate?.let { withTimeoutOrNull(PRIMARY_HEAD_START_MS) { it.await() } }
-        return backupPermits.withPermit { resolveHoster(data, hoster.hosterName) }
+        return playback(hoster.internalData.parseAs<HosterData>())
     }
 
-    private suspend fun resolveHoster(
-        data: HosterData,
-        name: String,
-    ): List<Video> {
-        val videos = buildVideos(resolveLinks(data), data)
-        if (videos.isEmpty()) throw Exception("The site returned no playable link for $name")
-        // `preferred` lets the player start this video as soon as it is ready instead of waiting
-        // for every other quality to finish loading.
-        return videos.sortVideos().mapIndexed { index, video ->
-            video.copy(preferred = data.primary && index == 0)
+    /** One walk through the site at a time (its gateway bans bursts); a play that was just resolved is reused. */
+    private val playbackLock = Mutex()
+
+    @Volatile private var playbackCache: Triple<String, Long, List<Video>>? = null
+
+    private suspend fun playback(data: HosterData): List<Video> {
+        val key = listOf(baseUrl, data.id, data.season, data.number, data.audio, data.resolution, prefServer, showTorrent).joinToString("|")
+
+        fun cached(): List<Video>? = playbackCache?.let { (cachedKey, time, videos) ->
+            videos.takeIf { cachedKey == key && System.currentTimeMillis() - time < PLAYBACK_CACHE_MS }
+        }
+        cached()?.let { return it }
+        return playbackLock.withLock {
+            // The same walk may have finished while this call waited for the lock.
+            cached()
+                ?: withTimeoutOrNull(PLAYBACK_DEADLINE_MS) { resolvePlayback(data) }
+                    ?.also { playbackCache = Triple(key, System.currentTimeMillis(), it) }
+                ?: throw IOException("The site took too long to answer. Check your connection and try again.")
         }
     }
-
-    private suspend fun resolveLinks(data: HosterData): DdlLinks {
-        data.ddl
-            ?.let { raw -> runCatching { parseDdl(json.parseToJsonElement(raw)) }.getOrNull() }
-            ?.takeIf { it.hasPlayable() }
-            ?.let { return it }
-
-        // Fast path: a recent X-DDL-Token is reused, skipping the download page round-trip.
-        cachedToken()?.let { token ->
-            val links = fetchDdl(listOf(fileNameOf(data.href)), token, baseUrl + data.href)
-            if (links != null) return links
-            tokenCache = null
-        }
-
-        return try {
-            resolveDownloadPage(data)
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            // The ?token= on download links is time-limited: reload the listing once for a fresh one.
-            val refreshed = refreshHref(data) ?: throw e
-            resolveDownloadPage(data.copy(href = refreshed))
-        }
-    }
-
-    private suspend fun refreshHref(data: HosterData): String? {
-        val resolution = STANDARD_RESOLUTIONS[data.resolution] ?: return null
-        val ref = EpisodeRef(data.id, data.season, data.number, data.audio)
-        return fetchListing(data.id, data.season, resolution, fresh = true)
-            .findMatch(ref)
-            ?.href
-            ?.takeIf { it != data.href }
-    }
-
-    @Volatile private var tokenCache: Triple<String, String, Long>? = null
-
-    private fun cachedToken(): String? {
-        val (host, token, time) = tokenCache ?: return null
-        if (host != baseUrl || System.currentTimeMillis() - time > TOKEN_TTL_MS) return null
-        return token
-    }
-
-    private fun fileNameOf(href: String): String = decode(href.substringBefore('?').substringAfterLast('/'))
 
     /**
-     * Walks the download page the way the site's own script does: the page reports its state in
-     * `#main-content[data-state]`: `adcheck` asks for a small hidden form to be posted back,
-     * `preparing` means the site is still getting the file ready (this takes a few seconds, the
-     * page is simply asked again), and a ready page carries the direct / stream / torrent links
-     * and the token for the `/get_ddl/` API.
+     * Finds the episode at the wanted quality (falling back to the closest one that has it), asks the site
+     * for a fresh token, opens that one download page and hands out the links it carries.
      */
-    private suspend fun resolveDownloadPage(data: HosterData): DdlLinks {
-        val pageUrl = baseUrl + data.href
-        val referer = data.referer.toSiteUrl()
-        var doc = loadPage(pageUrl, referer)
+    private suspend fun resolvePlayback(data: HosterData): List<Video> {
+        val ref = EpisodeRef(data.id, data.season, data.number, data.audio)
+        var failure: IOException? = null
+        var failures = 0
+        for (height in fallbackOrder(data.resolution)) {
+            val resolution = STANDARD_RESOLUTIONS[height] ?: continue
+            val entry = fetchListing(data.id, data.season, resolution, fresh = true, strict = true).findMatch(ref) ?: continue
+            try {
+                return openEntry(entry, height, data.id)
+            } catch (e: DownloadPageException) {
+                // A page that reports an error is worth one try at the next quality; a page that is merely slow is not.
+                if (!e.tryNext || ++failures >= MAX_PAGE_FAILURES) throw e
+                failure = e
+            }
+        }
+        throw failure ?: IOException("Episode ${formatNumber(data.number)} is not available on the site right now.")
+    }
+
+    /** The wanted quality first, then the lower ones (they start faster on a weak connection), then the higher ones. */
+    private fun fallbackOrder(height: Int): List<Int> {
+        val all = STANDARD_RESOLUTIONS.keys
+        return listOf(height) + all.filter { it < height }.sortedDescending() + all.filter { it > height }.sorted()
+    }
+
+    private class PageResult(
+        val links: DdlLinks,
+        val referer: String,
+    )
+
+    private suspend fun openEntry(
+        entry: EpisodeEntry,
+        height: Int,
+        id: String,
+    ): List<Video> {
+        val embedded =
+            entry.ddl
+                ?.let { raw -> attempt { parseDdl(json.parseToJsonElement(raw)) } }
+                ?.takeIf { it.hasPlayable() }
+        val page = if (embedded != null) PageResult(embedded, "$baseUrl/anime/$id") else downloadPage(entry.href, id)
+        val videos = buildVideos(page.links, height, entry.audio, page.referer)
+        if (videos.isEmpty()) throw DownloadPageException("The site returned no playable link for ${height}p.", tryNext = true)
+        // `preferred` lets the player start the first video right away instead of waiting for anything else.
+        return videos.sortVideos().mapIndexed { index, video -> video.copy(preferred = index == 0) }
+    }
+
+    private suspend fun downloadPage(
+        href: String,
+        id: String,
+    ): PageResult {
+        val animeUrl = "$baseUrl/anime/$id"
+        val listed = absolute(href).toHttpUrl()
+        // The token of the listing is only the fallback: the site's own scripts renew it right before opening a page.
+        val pageUrl = (renewToken(listed) ?: listed).toString()
+        val doc = walkPage(pageUrl, animeUrl)
+        return PageResult(extractLinks(doc, pageUrl, href), pageUrl)
+    }
+
+    /** `GET /get_token` answers `{"token": …}`; [listed] gets it in place of the token the listing carried. */
+    private suspend fun renewToken(listed: HttpUrl): HttpUrl? {
+        val token =
+            withTimeoutOrNull(TOKEN_TIMEOUT_MS) {
+                attempt {
+                    val body = client.get("$baseUrl/get_token", jsonHeaders(listed.toString()), CacheControl.FORCE_NETWORK).bodyString()
+                    (json.parseToJsonElement(body) as? JsonObject)?.string("token")
+                }
+            }?.takeIf { it.isNotBlank() } ?: return null
+        return listed.newBuilder().setQueryParameter("token", token).build()
+    }
+
+    /**
+     * Walks the download page the way the site's own script does. The page reports its state in
+     * `#main-content[data-state]`: `adcheck` asks for a small hidden form to be posted back, `preparing` means the
+     * site is still getting the file ready (the page is simply asked again, quickly at first), `adblock` and
+     * `error` are final, and any other state is a ready page that carries the links.
+     */
+    private suspend fun walkPage(
+        pageUrl: String,
+        animeUrl: String,
+    ): Document {
+        val started = System.currentTimeMillis()
+        var doc = loadPage(pageUrl, animeUrl)
         var adChecks = 0
-        var reloads = 0
-        var state = ""
+        var polls = 0
+        var wait = PREPARE_FIRST_DELAY_MS
         while (true) {
             ensureNotBlocked(doc)
-            state = doc.selectFirst("#main-content[data-state]")?.attr("data-state").orEmpty()
-            when (state) {
-                "adcheck" -> {
+            val state = doc.selectFirst("#main-content[data-state]")?.attr("data-state").orEmpty()
+            when {
+                state == "adcheck" -> {
                     if (++adChecks > MAX_ADCHECKS) {
-                        throw IOException("The site's download check failed. Open the episode in WebView once, then retry.")
+                        throw DownloadPageException("The site's download check failed. Open the episode in WebView once, then retry.")
                     }
-                    val form =
-                        doc.selectFirst("form#ddl-adcheck-form")
-                            ?: throw IOException("The site's download check form is missing.")
-                    val body =
-                        FormBody
-                            .Builder()
-                            .apply {
-                                form.select("input[name]:not([disabled])").forEach { add(it.attr("name"), it.attr("value")) }
-                            }.build()
-                    val action = form.absUrl("action").ifEmpty { pageUrl }
-                    val headers = pageHeaders(pageUrl).newBuilder().set("Origin", baseUrl).build()
-                    doc = client.post(action, headers, body, ensureSuccess = false).useAsJsoup()
+                    doc = submitAdCheck(doc, pageUrl)
                 }
 
-                "preparing" -> {
-                    if (++reloads > MAX_PREPARE_RELOADS) throw IOException("The site is still preparing this video. Try again in a moment.")
-                    delay(PREPARE_DELAY_MS)
-                    doc = loadPage(pageUrl, referer)
+                state == "adblock" || state == "error" -> {
+                    throw DownloadPageException(
+                        doc.selectFirst("#error-message")?.text()?.ifEmpty { null } ?: "The site could not prepare this video.",
+                        tryNext = state == "error",
+                    )
                 }
 
-                "adblock", "error" -> {
-                    throw IOException(doc.selectFirst("#error-message")?.text()?.ifEmpty { null } ?: "The site could not prepare this video.")
+                state != "preparing" && (state.isEmpty() || state == "ready" || hasLinks(doc)) -> {
+                    return doc
                 }
 
                 else -> {
-                    break
+                    // "preparing", and any state this app does not know yet: the page is simply asked again.
+                    if (System.currentTimeMillis() - started + wait > PAGE_DEADLINE_MS) {
+                        throw DownloadPageException("The site is still preparing this video (${state.ifEmpty { "no state" }}, $polls checks). Try again in a moment.")
+                    }
+                    polls++
+                    delay(wait)
+                    wait = (wait + PREPARE_DELAY_STEP_MS).coerceAtMost(PREPARE_MAX_DELAY_MS)
+                    doc = loadPage(pageUrl, animeUrl)
                 }
             }
         }
+    }
 
-        val scripts = doc.select("script").joinToString("\n") { it.data() }
+    /** Whether the page already carries a file link (checked with real values: a not-ready page may hold empty buttons). */
+    private fun hasLinks(doc: Document): Boolean = firstAttr(
+        doc,
+        "#download-now-btn[data-href]" to "data-href",
+        "[data-stream]" to "data-stream",
+        "a[href*='/dl/']" to "href",
+        "iframe#anime-video-player[src]" to "src",
+    ) != null
+
+    private suspend fun submitAdCheck(
+        doc: Document,
+        pageUrl: String,
+    ): Document {
+        val form =
+            doc.selectFirst("form#ddl-adcheck-form")
+                ?: throw IOException("The site's download check form is missing.")
+        val body =
+            FormBody
+                .Builder()
+                .apply {
+                    form.select("input[name]:not([disabled])").forEach { add(it.attr("name"), it.attr("value")) }
+                }.build()
+        val action = form.absUrl("action").ifEmpty { pageUrl }
+        val headers = pageHeaders(pageUrl).newBuilder().set("Origin", baseUrl).build()
+        return client.post(action, headers, body, ensureSuccess = false).useAsJsoup()
+    }
+
+    private suspend fun loadPage(
+        url: String,
+        referer: String,
+    ): Document {
+        val response = client.get(url, pageHeaders(referer), CacheControl.FORCE_NETWORK, ensureSuccess = false)
+        val code = response.code
+        val doc = response.useAsJsoup()
+        // A page that carries the state markup is read even when the status is not 2xx, so its own message is shown.
+        if (code in 200..299 || doc.selectFirst("#main-content[data-state]") != null) return doc
+        throw DownloadPageException("The site answered HTTP $code for the download page.", tryNext = code in 400..499)
+    }
+
+    private fun ensureNotBlocked(doc: Document) {
+        if (doc.selectFirst("script#anubis_challenge") != null) {
+            throw IOException("The site's bot check is still active. Open the site in WebView once, then retry.")
+        }
+        if (doc.location().contains("/home/blocked") || doc.title().contains("Access Blocked", ignoreCase = true)) {
+            throw IOException("The site rejected this session. Refresh the episode list and retry.")
+        }
+    }
+
+    /**
+     * The ready page carries its links in the markup. The `/get_ddl/` API (whose token sits in the page's
+     * script) is only asked when the page does not have them, so the common case needs no extra request.
+     */
+    private suspend fun extractLinks(
+        doc: Document,
+        pageUrl: String,
+        href: String,
+    ): DdlLinks {
         val html = doc.outerHtml()
-        val token = extractDdlToken(scripts) ?: extractDdlToken(html)
         val fileName =
             doc.selectFirst("#dl-file-name, .dl-file-name")?.text()?.ifEmpty { null }
                 ?: doc.selectFirst("#file-details[data-file-name]")?.attr("data-file-name")?.ifEmpty { null }
@@ -1145,7 +1188,7 @@ class AnimeAlpha : Source() {
                     ?.groupValues
                     ?.get(1)
                     ?.let { Parser.unescapeEntities(it, false) }
-                ?: fileNameOf(data.href)
+                ?: fileNameOf(href)
         val size = doc.selectFirst("#dl-stat-size")?.text()?.ifEmpty { null }
 
         val direct =
@@ -1165,8 +1208,14 @@ class AnimeAlpha : Source() {
         val watch = extractWatchLink(html)
         val torrent = firstAttr(doc, "a#torrent-btn[href]" to "href", "a[href^='magnet:']" to "href")
 
-        val ddl = token?.let { fetchDdl(listOf(fileName, fileNameOf(data.href)).distinct(), it, pageUrl) }
-        if (token != null && ddl != null) tokenCache = Triple(baseUrl, token, System.currentTimeMillis())
+        val ddl =
+            if (direct == null && streamOrWatch == null) {
+                val scripts = doc.select("script").joinToString("\n") { it.data() }
+                (extractDdlToken(scripts) ?: extractDdlToken(html))
+                    ?.let { token -> fetchDdl(listOf(fileName, fileNameOf(href)).distinct(), token, pageUrl) }
+            } else {
+                null
+            }
 
         val streamIsWatch = streamOrWatch?.contains("/watch/") == true
         val links =
@@ -1182,7 +1231,10 @@ class AnimeAlpha : Source() {
                 subtitles = ddl?.subtitles.orEmpty(),
             )
         if (!links.hasPlayable()) {
-            throw IOException("The download page gave no playable link (state: ${state.ifEmpty { "ready" }}). Open the episode in WebView once, then retry.")
+            throw DownloadPageException(
+                "The download page gave no playable link (${doc.title().take(40).ifEmpty { "no title" }}). Open the episode in WebView once, then retry.",
+                tryNext = true,
+            )
         }
         return links
     }
@@ -1198,19 +1250,7 @@ class AnimeAlpha : Source() {
             ?.takeIf { it.isNotEmpty() }
     }
 
-    private suspend fun loadPage(
-        url: String,
-        referer: String,
-    ): Document = client.get(url, pageHeaders(referer), CacheControl.FORCE_NETWORK).useAsJsoup()
-
-    private fun ensureNotBlocked(doc: Document) {
-        if (doc.selectFirst("script#anubis_challenge") != null) {
-            throw IOException("The site's bot check is still active. Open the site in WebView once, then retry.")
-        }
-        if (doc.location().contains("/home/blocked") || doc.title().contains("Access Blocked", ignoreCase = true)) {
-            throw IOException("The site rejected this session. Refresh the episode list and retry.")
-        }
-    }
+    private fun fileNameOf(href: String): String = decode(href.substringBefore('?').substringAfterLast('/'))
 
     private suspend fun fetchDdl(
         candidates: List<String>,
@@ -1293,10 +1333,12 @@ class AnimeAlpha : Source() {
 
     private suspend fun buildVideos(
         links: DdlLinks,
-        data: HosterData,
+        height: Int,
+        listedAudio: String?,
+        referer: String,
     ): List<Video> = coroutineScope {
         val audio =
-            data.audio ?: when {
+            listedAudio ?: when {
                 links.audioLanguages.size > 1 -> "Dual"
                 links.audioLanguages.size == 1 -> links.audioLanguages.first()
                 else -> null
@@ -1304,18 +1346,18 @@ class AnimeAlpha : Source() {
         val info = listOfNotNull(audio, links.fileSize).joinToString(" · ")
 
         fun title(server: String) = buildString {
-            append(data.resolution).append("p · ").append(server)
+            append(height).append("p · ").append(server)
             if (info.isNotEmpty()) append(" · ").append(info)
         }
         val subtitles = links.subtitles.map { Track(it.first, it.second) }
 
-        // Resolve the site's redirect links in parallel, once, here.
-        val stream = links.stream?.let { async { finalUrl(it, media = true) } }
-        val direct = links.download?.let { async { finalUrl(it, media = true) } }
+        // The site's redirect links are followed in parallel, once, here.
+        val stream = links.stream?.let { async { resolveLink(it, referer) } }
+        val direct = links.download?.let { async { resolveLink(it, referer) } }
         val dash =
             links.dash
                 ?: dashFromWatch(links.watch)
-                ?: links.watch?.takeIf { prefServer == SERVER_DASH }?.let { dashFromWatch(finalUrl(it, media = false)) }
+                ?: links.watch?.takeIf { prefServer == SERVER_DASH }?.let { dashFromWatch(resolveLink(it, referer)) }
 
         val videos = mutableListOf<Video>()
 
@@ -1331,17 +1373,17 @@ class AnimeAlpha : Source() {
                 Video(
                     videoUrl = playable,
                     videoTitle = title(server),
-                    resolution = data.resolution,
+                    resolution = height,
                     headers = videoHeaders(url),
                     subtitleTracks = subtitles,
                     mpvArgs = NETWORK_MPV_ARGS,
                     initialized = true,
                 )
         }
-        add(stream?.await(), SERVER_STREAM)
         add(direct?.await(), SERVER_DIRECT)
+        add(stream?.await(), SERVER_STREAM)
         add(dash, SERVER_DASH)
-        links.torrent?.takeIf { showTorrent }?.let { videos += torrentVideo(it, title(SERVER_TORRENT), data) }
+        links.torrent?.takeIf { showTorrent }?.let { videos += torrentVideo(it, title(SERVER_TORRENT), height) }
         videos
     }
 
@@ -1361,50 +1403,82 @@ class AnimeAlpha : Source() {
         return "$url#$extension"
     }
 
-    private val redirectCache = ConcurrentHashMap<String, Pair<Long, String>>()
+    /** Runs [block] and turns every failure except a cancellation into `null`. */
+    private inline fun <T> attempt(block: () -> T): T? = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
+    /** A copy of [client] that leaves redirects to the caller, so the site's hops can be followed one by one. */
+    private val redirectClient: OkHttpClient by lazy {
+        client
+            .newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+    }
 
     /**
-     * The links the site hands out are short redirects (`/r/…`, `/dl/…`). Giving those to the
-     * player would make it walk the redirect through the site's bot gateway again on every seek
-     * and buffer refill, which trips the gateway's burst limit and stalls weak connections.
-     * Following the redirect once here hands the player the final file URL directly.
+     * The links the site hands out are short redirects (`/r/…`, `/dl/…`) that end at the file host. They are
+     * followed here, by hand and only through the site's own hops, and the player gets the file host's address
+     * straight away. (A site link would walk the player through the site's bot gateway on every seek and buffer
+     * refill, which trips the gateway's burst limit and stalls weak connections; and the file host itself is not
+     * contacted from here, so a slow first byte there never holds the list back.)
      *
-     * A tiny ranged GET is used because some file hosts refuse HEAD. Any failure falls back to the
-     * original link, so this can only make playback faster.
+     * Slow or failing lookups fall back to the original link, so this can only make playback faster. A link that
+     * turns out to be a web page without any video in it is dropped (`null`), because the player cannot open it.
      */
-    private suspend fun finalUrl(
+    private suspend fun resolveLink(
         url: String,
-        media: Boolean,
-    ): String {
-        val httpUrl = url.toHttpUrlOrNull() ?: return url
-        if (!isSiteUrl(httpUrl)) return url
-        val now = System.currentTimeMillis()
-        redirectCache[url]?.let { (time, resolved) -> if (now - time < REDIRECT_TTL_MS) return resolved }
+        referer: String,
+    ): String? {
+        val first = url.toHttpUrlOrNull()?.takeIf { isSiteUrl(it) } ?: return url
+        val resolved = withTimeoutOrNull(REDIRECT_TIMEOUT_MS) { attempt { followSiteRedirects(first, referer) } }
+        return when {
+            resolved == null -> url
+            resolved.isEmpty() -> null
+            else -> resolved
+        }
+    }
 
-        val resolved =
-            withTimeoutOrNull(REDIRECT_TIMEOUT_MS) {
-                runCatching {
-                    // No manual Cookie header here: the client's cookie jar attaches the site's cookies
-                    // to site hosts only, while a hand-set header would follow the redirect to the file host.
-                    val headers =
-                        headersBuilder()
-                            .set("Accept", "*/*")
-                            .set("Referer", "$baseUrl/")
-                            .set("Range", "bytes=0-0")
-                            .build()
-                    client.get(httpUrl, headers, CacheControl.FORCE_NETWORK, ensureSuccess = false).use { response ->
-                        val type = response.header("Content-Type").orEmpty()
-                        val ok = response.isSuccessful && (!media || !type.contains("html", ignoreCase = true))
-                        response.request.url
-                            .toString()
-                            .takeIf { ok }
+    /** The address a site link ends at: `null` when that could not be told, `""` for a page that holds no video. */
+    private suspend fun followSiteRedirects(
+        start: HttpUrl,
+        referer: String,
+    ): String? {
+        val headers = headersBuilder().set("Accept", "*/*").set("Referer", referer).build()
+        var target = start
+        repeat(MAX_REDIRECTS) {
+            val next =
+                redirectClient.get(target, headers, CacheControl.FORCE_NETWORK, ensureSuccess = false).use { response ->
+                    when {
+                        response.isRedirect -> response.header("Location")?.let { response.request.url.resolve(it) } ?: return null
+                        !response.isSuccessful -> return null
+                        response.header("Content-Type")?.contains("text/html", ignoreCase = true) == true -> return playerSource(response, target)
+                        else -> target
                     }
-                }.getOrNull()
-            } ?: return url
+                }
+            if (next == target || !isSiteUrl(next)) return next.toString()
+            target = next
+        }
+        return null
+    }
 
-        if (redirectCache.size > REDIRECT_CACHE_SIZE) redirectCache.clear()
-        redirectCache[url] = now to resolved
-        return resolved
+    /** The video a player page points to (`<dash-video src>`, `<video><source src>`), or `""` when it holds none. */
+    private fun playerSource(
+        response: Response,
+        pageUrl: HttpUrl,
+    ): String {
+        val html = runCatching { response.peekBody(HTML_PEEK_BYTES).string() }.getOrDefault("")
+        return Jsoup
+            .parse(html, pageUrl.toString())
+            .select("dash-video[src], video source[src], video[src]")
+            // An empty `src` is a placeholder; resolved against the page it would point back at the page itself.
+            .firstNotNullOfOrNull { element -> element.takeIf { it.attr("src").isNotBlank() }?.absUrl("src")?.ifEmpty { null } }
+            .orEmpty()
     }
 
     // ============================== Torrent ===============================
@@ -1417,20 +1491,20 @@ class AnimeAlpha : Source() {
     private fun torrentVideo(
         url: String,
         title: String,
-        data: HosterData,
+        height: Int,
     ): Video {
         if (url.startsWith("magnet:")) {
             return Video(
                 videoUrl = TorrentMagnet.normalize(url, PUBLIC_TRACKERS),
                 videoTitle = title,
-                resolution = data.resolution,
+                resolution = height,
                 initialized = true,
             )
         }
         return Video(
             videoUrl = "$url#resolve",
             videoTitle = title,
-            resolution = data.resolution,
+            resolution = height,
             internalData = TORRENT_PREFIX + url,
             initialized = false,
         )
@@ -1648,8 +1722,8 @@ class AnimeAlpha : Source() {
         private const val SERVER_DASH = "DASH"
         private const val SERVER_DIRECT = "Direct DL"
         private const val SERVER_TORRENT = "Torrent"
-        private val SERVER_ORDER = listOf(SERVER_STREAM, SERVER_DIRECT, SERVER_DASH, SERVER_TORRENT)
-        private const val PREF_SERVER_DEFAULT = SERVER_STREAM
+        private val SERVER_ORDER = listOf(SERVER_DIRECT, SERVER_STREAM, SERVER_DASH, SERVER_TORRENT)
+        private const val PREF_SERVER_DEFAULT = SERVER_DIRECT
 
         private const val MOVIE_SEASON = "movie"
         private const val MAX_SEASONS = 30
@@ -1672,17 +1746,18 @@ class AnimeAlpha : Source() {
         private const val LISTING_TTL_MS = 45 * 1000L
         private const val LISTING_CACHE_SIZE = 64
 
-        private const val OPTIONAL_LISTING_MS = 6_000L
-        private const val PRIMARY_HEAD_START_MS = 6_000L
-        private const val BACKUP_CONCURRENCY = 2
-        private const val GATE_CACHE_SIZE = 32
-        private const val TOKEN_TTL_MS = 10 * 60 * 1000L
-        private const val REDIRECT_TIMEOUT_MS = 8_000L
-        private const val REDIRECT_TTL_MS = 5 * 60 * 1000L
-        private const val REDIRECT_CACHE_SIZE = 64
+        private const val PLAYBACK_CACHE_MS = 60 * 1000L
+        private const val PLAYBACK_DEADLINE_MS = 75 * 1000L
+        private const val TOKEN_TIMEOUT_MS = 6_000L
+        private const val REDIRECT_TIMEOUT_MS = 6_000L
+        private const val MAX_REDIRECTS = 8
+        private const val HTML_PEEK_BYTES = 256L * 1024
         private const val MAX_ADCHECKS = 2
-        private const val MAX_PREPARE_RELOADS = 8
-        private const val PREPARE_DELAY_MS = 4_000L
+        private const val MAX_PAGE_FAILURES = 2
+        private const val PAGE_DEADLINE_MS = 35_000L
+        private const val PREPARE_FIRST_DELAY_MS = 1_500L
+        private const val PREPARE_DELAY_STEP_MS = 500L
+        private const val PREPARE_MAX_DELAY_MS = 3_000L
 
         private val KNOWN_MEDIA_EXTENSIONS = listOf(".mkv", ".mp4", ".webm", ".m3u8", ".mpd")
 
