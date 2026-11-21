@@ -1323,10 +1323,13 @@ class AnimeAlpha : Source() {
             url: String?,
             server: String,
         ) {
-            if (url.isNullOrBlank() || videos.any { it.videoUrl == url }) return
+            if (url.isNullOrBlank()) return
+            // Only the two file links need the container hint (DASH manifests and magnets are self-describing).
+            val playable = if (server == SERVER_STREAM || server == SERVER_DIRECT) withContainerHint(url, links.fileName) else url
+            if (videos.any { it.videoUrl == playable }) return
             videos +=
                 Video(
-                    videoUrl = url,
+                    videoUrl = playable,
                     videoTitle = title(server),
                     resolution = data.resolution,
                     headers = videoHeaders(url),
@@ -1340,6 +1343,22 @@ class AnimeAlpha : Source() {
         add(dash, SERVER_DASH)
         links.torrent?.takeIf { showTorrent }?.let { videos += torrentVideo(it, title(SERVER_TORRENT), data) }
         videos
+    }
+
+    /**
+     * The site's file links carry no file extension. Without one the player's format probing can end in
+     * "Unrecognised file format" for these streams, so the container is hinted with a URL fragment, which is
+     * never sent to the server (the site's other extension fixed the very same failure this way).
+     */
+    private fun withContainerHint(
+        url: String,
+        fileName: String?,
+    ): String {
+        if (url.contains('#')) return url
+        val path = url.toHttpUrlOrNull()?.encodedPath ?: return url
+        if (KNOWN_MEDIA_EXTENSIONS.any { path.endsWith(it, ignoreCase = true) }) return url
+        val extension = if (fileName?.endsWith(".mp4", ignoreCase = true) == true) ".mp4" else ".mkv"
+        return "$url#$extension"
     }
 
     private val redirectCache = ConcurrentHashMap<String, Pair<Long, String>>()
@@ -1664,6 +1683,8 @@ class AnimeAlpha : Source() {
         private const val MAX_ADCHECKS = 2
         private const val MAX_PREPARE_RELOADS = 8
         private const val PREPARE_DELAY_MS = 4_000L
+
+        private val KNOWN_MEDIA_EXTENSIONS = listOf(".mkv", ".mp4", ".webm", ".m3u8", ".mpd")
 
         private const val TORRENT_PREFIX = "torrent:"
         private const val TORRENT_TIMEOUT_MS = 25_000L
