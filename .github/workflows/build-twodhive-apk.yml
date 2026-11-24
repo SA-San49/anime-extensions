@@ -191,6 +191,23 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # The APK is also kept in the repository, so that it can be fetched with a plain `git fetch`
+      # and without an account that is allowed to read the workflow's artifacts.
+      - name: Publish the APK in the repository
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        env:
+          APK_PATH: ${{ steps.apk.outputs.path }}
+          VERSION: ${{ steps.apk.outputs.version }}
+        run: |
+          mkdir -p releases
+          cp "$APK_PATH" "releases/tachiyomi-en.twodhive-v${VERSION}.apk"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add releases
+          git commit -m "chore(releases): the 2Dhive APK of ${GITHUB_SHA::7}" || echo "nothing to commit"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME}"
+
       # A pre-release is far easier to install from a phone than a zipped Actions artifact,
       # and it does not expire. The tag follows the branch, so only the latest build is kept.
       - name: Publish pre-release
