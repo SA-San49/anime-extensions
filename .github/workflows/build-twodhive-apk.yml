@@ -235,6 +235,7 @@ jobs:
             --title "2Dhive $VERSION (CI build of ${GITHUB_SHA::7})" \
             --notes "2Dhive extension (extension lib 16) built from \`$GITHUB_REF_NAME\` at \`${GITHUB_SHA::7}\`. Install it in Aniyomi / Anikku via Settings > Browse > Extensions > Install from file (or open the APK), then trust the extension when asked. $SIGNING Signer SHA-256: \`${SIGNER:-n/a}\`."
           echo "Published: $(gh release view "$TAG" --json url --jq .url)" | tee -a "$GITHUB_STEP_SUMMARY"
+          gh release edit "$TAG" --draft=false --prerelease 2>/dev/null || true
 
       - name: Fail the job when the build failed
         if: steps.build.outcome != 'success'
