@@ -12,7 +12,7 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
-import keiyoushi.network.GET
+import eu.kanade.tachiyomi.network.GET
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.addListPreference
