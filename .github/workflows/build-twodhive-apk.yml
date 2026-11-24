@@ -199,6 +199,7 @@ jobs:
         env:
           APK_PATH: ${{ steps.apk.outputs.path }}
           VERSION: ${{ steps.apk.outputs.version }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p releases
           cp "$APK_PATH" "releases/tachiyomi-en.twodhive-v${VERSION}.apk"
