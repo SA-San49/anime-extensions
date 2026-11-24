@@ -145,8 +145,7 @@ object TwoDHiveCrypto {
      * The payload names the file in a `file` field; the surrounding JSON has changed shape before,
      * so the field is read out of the text rather than parsed.
      */
-    fun megaPlayFile(plain: String): String? =
-        MEGAPLAY_FILE_REGEX.find(plain)?.groupValues?.get(1)?.takeIf(String::isNotBlank)
+    fun megaPlayFile(plain: String): String? = MEGAPLAY_FILE_REGEX.find(plain)?.groupValues?.get(1)?.takeIf(String::isNotBlank)
 
     /**
      * Signs a MegaPlay CDN URL with the token the CDN expects.
@@ -289,10 +288,9 @@ object TwoDHiveCrypto {
      * The counter is one-based; deriving it from zero produces proofs the server rejects, which is
      * an expensive way to be wrong.
      */
-    fun capProofs(token: String, count: Int, saltLength: Int, difficulty: Int): List<Pair<String, String>> =
-        (1..count).map { counter ->
-            capSeededHex("$token$counter", saltLength) to capSeededHex("$token${counter}d", difficulty)
-        }
+    fun capProofs(token: String, count: Int, saltLength: Int, difficulty: Int): List<Pair<String, String>> = (1..count).map { counter ->
+        capSeededHex("$token$counter", saltLength) to capSeededHex("$token${counter}d", difficulty)
+    }
 
     /**
      * Solves every proof of a challenge, spread across the CPU.
@@ -328,8 +326,7 @@ object TwoDHiveCrypto {
     }
 
     /** Base64 without padding, in the alphabet a URL can carry. */
-    fun base64Url(bytes: ByteArray): String =
-        Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+    fun base64Url(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
 
     private val MEGAPLAY_FILE_REGEX = Regex("\"file\"\\s*:\\s*\"([^\"]+)\"")
 

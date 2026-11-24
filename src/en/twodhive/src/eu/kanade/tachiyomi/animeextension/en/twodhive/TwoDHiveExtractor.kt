@@ -163,9 +163,8 @@ class TwoDHiveExtractor(
      * `file` field, or a list of such objects.
      */
     private fun MegaPlaySourcesDto.fileUrl(): String? {
-        fun fromObject(value: JsonObject): String? =
-            value["file"]?.let { (it as? JsonPrimitive)?.contentOrNull }
-                ?: value["url"]?.let { (it as? JsonPrimitive)?.contentOrNull }
+        fun fromObject(value: JsonObject): String? = value["file"]?.let { (it as? JsonPrimitive)?.contentOrNull }
+            ?: value["url"]?.let { (it as? JsonPrimitive)?.contentOrNull }
 
         return when (val sources = sources) {
             is JsonPrimitive -> sources.contentOrNull?.takeIf { it.startsWith("http") }

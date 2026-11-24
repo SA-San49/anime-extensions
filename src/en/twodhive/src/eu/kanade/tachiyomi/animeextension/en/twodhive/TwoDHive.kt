@@ -140,14 +140,11 @@ class TwoDHive : AnimeHttpSource(), ConfigurableAnimeSource {
         .apply { if (page > 1) addQueryParameter("page", page.toString()) }
         .build()
 
-    override fun popularAnimeParse(response: Response): AnimesPage =
-        parseCatalog(response, paged = true)
+    override fun popularAnimeParse(response: Response): AnimesPage = parseCatalog(response, paged = true)
 
-    override fun latestUpdatesParse(response: Response): AnimesPage =
-        parseCatalog(response, paged = true)
+    override fun latestUpdatesParse(response: Response): AnimesPage = parseCatalog(response, paged = true)
 
-    override fun searchAnimeParse(response: Response): AnimesPage =
-        parseCatalog(response, paged = false)
+    override fun searchAnimeParse(response: Response): AnimesPage = parseCatalog(response, paged = false)
 
     /**
      * Reads the catalog out of a rendered page.
@@ -363,8 +360,7 @@ class TwoDHive : AnimeHttpSource(), ConfigurableAnimeSource {
 
     private fun SEpisode.malId(): Int = MAL_ID_REGEX.find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
-    private fun SEpisode.episodeNumber(): Int =
-        EPISODE_NUMBER_REGEX.find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+    private fun SEpisode.episodeNumber(): Int = EPISODE_NUMBER_REGEX.find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
 
     private fun Hoster.server(): String = internalData.split("::").getOrNull(3).orEmpty()
 

@@ -148,8 +148,8 @@ jobs:
             echo "## Problem lines"
             { cat format.log build.log 2>/dev/null || true; } | grep -nE "^e: |^w: .*twodhive|error:|FAILED|What went wrong|Execution failed|Caused by|ERROR:|format violations" | cut -c1-600 | head -n 150
             echo
-            echo "## Formatting check (tail)"
-            tail -n 40 format.log 2>/dev/null || true
+            echo "## Formatting check"
+            head -c 40000 format.log 2>/dev/null || true
             echo
             echo "## APK"
             cat apk-info.txt 2>/dev/null | head -n 220 || true

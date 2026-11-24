@@ -352,22 +352,21 @@ class TwoDHiveBabaStream(
         return digests <= MAX_CAP_DIGESTS
     }
 
-    private suspend fun postJson(url: String, body: RequestBody, referer: String): JsonObject? =
-        runCatching {
-            client.post(
-                url,
-                headers.newBuilder()
-                    .set("Accept", "application/json, text/plain, */*")
-                    .set("Content-Type", "application/json")
-                    .set("Referer", referer)
-                    .build(),
-                body,
-                ensureSuccess = false,
-            ).use { response ->
-                if (!response.isSuccessful) return@use null
-                jsonInstance.parseToJsonElement(response.bodyString()) as? JsonObject
-            }
-        }.getOrNull()
+    private suspend fun postJson(url: String, body: RequestBody, referer: String): JsonObject? = runCatching {
+        client.post(
+            url,
+            headers.newBuilder()
+                .set("Accept", "application/json, text/plain, */*")
+                .set("Content-Type", "application/json")
+                .set("Referer", referer)
+                .build(),
+            body,
+            ensureSuccess = false,
+        ).use { response ->
+            if (!response.isSuccessful) return@use null
+            jsonInstance.parseToJsonElement(response.bodyString()) as? JsonObject
+        }
+    }.getOrNull()
 
     private fun apiHeaders(referer: String): Headers = headers.newBuilder()
         .set("Accept", "application/json, text/plain, */*")
@@ -384,17 +383,13 @@ class TwoDHiveBabaStream(
         return message?.contains("verify", ignoreCase = true) == true
     }
 
-    private fun kotlinx.serialization.json.JsonElement?.asString(): String? =
-        (this as? JsonPrimitive)?.contentOrNull
+    private fun kotlinx.serialization.json.JsonElement?.asString(): String? = (this as? JsonPrimitive)?.contentOrNull
 
-    private fun kotlinx.serialization.json.JsonElement?.asInt(): Int? =
-        (this as? JsonPrimitive)?.let { it.intOrNull ?: it.contentOrNull?.toIntOrNull() }
+    private fun kotlinx.serialization.json.JsonElement?.asInt(): Int? = (this as? JsonPrimitive)?.let { it.intOrNull ?: it.contentOrNull?.toIntOrNull() }
 
-    private fun kotlinx.serialization.json.JsonElement?.asLong(): Long? =
-        (this as? JsonPrimitive)?.let { it.longOrNull ?: it.contentOrNull?.toLongOrNull() }
+    private fun kotlinx.serialization.json.JsonElement?.asLong(): Long? = (this as? JsonPrimitive)?.let { it.longOrNull ?: it.contentOrNull?.toLongOrNull() }
 
-    private fun kotlinx.serialization.json.JsonElement?.asBoolean(): Boolean? =
-        (this as? JsonPrimitive)?.let { it.booleanOrNull ?: it.contentOrNull?.toBooleanStrictOrNull() }
+    private fun kotlinx.serialization.json.JsonElement?.asBoolean(): Boolean? = (this as? JsonPrimitive)?.let { it.booleanOrNull ?: it.contentOrNull?.toBooleanStrictOrNull() }
 
     companion object {
         private const val TAG = "TwoDHiveBabaStream"
