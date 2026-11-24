@@ -27,6 +27,12 @@ object TwoDHiveParser {
         val thumbnail: String?,
     )
 
+    /** The titles of a page, and whether another page follows it. */
+    class Catalog(
+        val animes: List<SAnime>,
+        val hasNextPage: Boolean,
+    )
+
     /** One episode of an anime. */
     class Episode(
         val number: Int,
@@ -52,7 +58,7 @@ object TwoDHiveParser {
      * The cards are `<article>` elements, but a page that stops using them still lists every
      * title as a link, so the links are the fallback rather than the other way round.
      */
-    fun parseCatalog(document: Document): List<SAnime> {
+    fun parseCatalog(document: Document): Catalog {
         val articles = document.select("article")
         val blocks = articles.filter { it.selectFirst(ANIME_LINK_SELECTOR) != null }
             .takeIf { it.isNotEmpty() }
@@ -67,8 +73,20 @@ object TwoDHiveParser {
             animes += card.toSAnime()
         }
 
-        return animes
+        return Catalog(animes = animes, hasNextPage = document.hasNextPage())
     }
+
+    /**
+     * Whether the page leads to another one.
+     *
+     * The catalog paginates with a link to the next page, while the search results are all on
+     * one page. Asking for a second page of the search would only produce the same results
+     * again, so the link of the page itself is what decides.
+     */
+    private fun Document.hasNextPage(): Boolean =
+        select("a").any { link ->
+            link.text().trim().equals("next", ignoreCase = true) && link.attr("href").contains("page=")
+        }
 
     private fun parseCard(block: Element): Card? {
         val link = when {

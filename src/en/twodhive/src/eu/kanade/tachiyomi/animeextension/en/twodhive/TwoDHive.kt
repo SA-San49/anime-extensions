@@ -140,11 +140,11 @@ class TwoDHive : AnimeHttpSource(), ConfigurableAnimeSource {
         .apply { if (page > 1) addQueryParameter("page", page.toString()) }
         .build()
 
-    override fun popularAnimeParse(response: Response): AnimesPage = parseCatalog(response, paged = true)
+    override fun popularAnimeParse(response: Response): AnimesPage = parseCatalog(response)
 
-    override fun latestUpdatesParse(response: Response): AnimesPage = parseCatalog(response, paged = true)
+    override fun latestUpdatesParse(response: Response): AnimesPage = parseCatalog(response)
 
-    override fun searchAnimeParse(response: Response): AnimesPage = parseCatalog(response, paged = false)
+    override fun searchAnimeParse(response: Response): AnimesPage = parseCatalog(response)
 
     /**
      * Reads the catalog out of a rendered page.
@@ -152,10 +152,9 @@ class TwoDHive : AnimeHttpSource(), ConfigurableAnimeSource {
      * The site's own search box shows every match, while the JSON endpoint behind it stops at
      * nine, so the rendered list is the one worth reading.
      */
-    private fun parseCatalog(response: Response, paged: Boolean): AnimesPage {
-        val animes = TwoDHiveParser.parseCatalog(response.useAsJsoup())
-        val hasNextPage = paged && animes.size >= PAGE_SIZE
-        return AnimesPage(animes, hasNextPage)
+    private fun parseCatalog(response: Response): AnimesPage {
+        val catalog = TwoDHiveParser.parseCatalog(response.useAsJsoup())
+        return AnimesPage(catalog.animes, catalog.hasNextPage)
     }
 
     // =============================== Filters ==============================
@@ -377,9 +376,6 @@ class TwoDHive : AnimeHttpSource(), ConfigurableAnimeSource {
     }
 
     companion object {
-        /** The catalog shows twenty-four titles per page. */
-        private const val PAGE_SIZE = 24
-
         private const val RATE_LIMIT_PERMITS = 4
 
         private val SITE_HOSTS = setOf(
